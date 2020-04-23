@@ -1,3 +1,14 @@
+# EpiTracSim: simulates the spread of an infection in a
+# population of individuals, and evaluates the performance
+# of a proposed contact-tracing method. For details of the
+# method, see manuscript by Vishwesha Guttal, Sandeep Krishna,
+# Rahul Siddharthan (in preparation).
+
+# This code (c) Rahul Siddharthan, 2020.
+# Licence: BSD 2-clause.
+# Code and demo jupyter notebook available at
+# https://github.com/rsidd120/EpiTracSim
+
 module EpiTracSim
 using Random
 
