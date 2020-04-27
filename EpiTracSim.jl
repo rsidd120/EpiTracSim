@@ -289,7 +289,7 @@ end
 
 
 function update_contacts(node::UInt32, sender::UInt32, oldp::Float32, newp::Float32, probabilities::Array{Float32,1},
-        contactlist::Array{Array{Contact,1},1}, ignorelist::Array{Int32,1}, tolerance::Float64)
+        contactlist::Array{Array{Contact,1},1}, ignorelist::Array{Int32,1}, tolerance::Float64,p_t::Float64)
     ctime::Int64 = 0
     for d in contactlist[node]
         if d.id==sender
@@ -298,8 +298,6 @@ function update_contacts(node::UInt32, sender::UInt32, oldp::Float32, newp::Floa
         end
     end
     downstream = [c for c in contactlist[node] if ~(c.id in ignorelist) && c.meetings[end] >= ctime]
-    #print("Updating contacts: node, sender, ctime", node, sender, ctime)
-    #print(downstream)
     push!(ignorelist,node)
     for d in downstream
         p_old = probabilities[d.id]
@@ -321,7 +319,7 @@ function update_contacts(node::UInt32, sender::UInt32, oldp::Float32, newp::Floa
         
         probabilities[d.id] = p_new
         if ((p_old == 0.0 && p_new > tolerance) || (p_old > 0.0 && abs(p_new-p_old)/p_old > tolerance))
-            update_contacts(d.id,node,p_old,p_new,probabilities,contactlist,ignorelist,tolerance)
+            update_contacts(d.id,node,p_old,p_new,probabilities,contactlist,ignorelist,tolerance,p_t)
         end
     end
 end
@@ -382,7 +380,7 @@ function convert_exposed!(infected::Array{Int64,1}, expose_rate::Float64, epoch:
         if infected[n] < -2
             infected[n] += 1
         elseif infected[n] == -2 && rand() <= expose_rate
-            infected[n] = epoch
+            infected[n] = 1
         end
     end
 end
@@ -391,31 +389,38 @@ end
 function test_infected!(links::Array{Link,1},contactlist::Array{Array{Contact,1},1},
         probabilities::Array{Float32,1},probabilities_naive::Array{Float32,1}, 
         infected::Array{Int64,1}, tolerance::Float64, test_threshold::Float64, test_fraction::Float64, 
-        isolate_factor::Float64, epoch::Int64)
+        isolate_factor::Float64, epoch::Int64, p_t::Float64)
     
     positivelist = []
     for n in 1:length(infected)
-        if rand() < test_fraction 
-            if probabilities[n] > test_threshold 
+        if probabilities[n] > test_threshold 
+            if rand() < test_fraction 
                 pold = probabilities[n]
-                if infected[n] > 1 
+                if infected[n] == 1
+                    infected[n] = 2 # tested positive
                     probabilities[n] = pnew = probabilities_naive[n] = convert(Float32,1.0)
                     push!(positivelist,n)
+                # If negative test, person may still be in risky environment; don't reset to zero?
+                elseif infected[n] == 0 || infected[n]<= -2
+                    pnew = pold
+                    probabilities[n] = pnew = probabilities_naive[n] = convert(Float32,0.0)                    
                 else
                     pnew = pold
                 end
                 if ((pold == 0.0 && pnew > tolerance) || (pold > 0.0 && abs(pnew-pold)/pold > tolerance))
                     for c in contactlist[n]
                         ignorelist = [convert(Int32,0) for i in 1:0]
-                        update_contacts(c.id,convert(UInt32,n),pold,pnew,probabilities,contactlist,ignorelist,tolerance)
+                        update_contacts(c.id,convert(UInt32,n),pold,pnew,probabilities,contactlist,ignorelist,tolerance,p_t)
                     end
                 end
             end
         end
-    end 
-    for l in links
-        if l.node1 in positivelist || l.node2 in positivelist
-            l.weight *= isolate_factor
+    end
+    if isolate_factor < 1.0
+        for l in links
+            if l.node1 in positivelist || l.node2 in positivelist
+                l.weight *= isolate_factor
+            end
         end
     end
 end
@@ -429,43 +434,36 @@ function sweep(links::Array{Link,1},contactlist::Array{Array{Contact,1},1},
         isolate_factor::Float64)
     for l in links
         if rand() < l.weight
-            #print("Updating", convert(Int,l.node1)," ",convert(Int,l.node2))
-            # weed out recovered nodes
-            # convention: tlimit_cure==0 = no recovery
-            #if tlimit_cure > 0
-            #    for n =[l.node1,l.node2]
-            #        if 0 < infected[n] < epoch-tlimit
-            #            infected[n] = 0
-            #            probabilities_naive[n] = 0.0
-            #            p_old = probabilities[n]
-            #            probabilities[n] = 0.0
-            #            for c in contactlist[n]
-            #                ignorelist = [convert(Int32,0) for i in 1:0]
-            #                update_contacts(c.id,convert(UInt32,n),p_old,convert(Float32,0.0),probabilities,contactlist,ignorelist,tolerance)
-            #            end
-            #        end 
-            #    end
-            #end
             # update infected and probabilities_naive
             if infected[l.node1] == -1 || infected[l.node2] == -1 # one of them is recovered, immune
                 continue
             end
             update_this = (rand() < 1.0-miss_rate) # if false, probabilities not updated
-            if infected[l.node1] ==0 && infected[l.node2] > 0
+            if infected[l.node1] ==0 && infected[l.node2] > 0 
                 if rand() < p_t
                     infected[l.node1] = -2-exposed_init
                 end
-                if update_this
+                if test_threshold == 1.0 && update_this # naive oracle
                     pn = probabilities_naive[l.node1]
                     probabilities_naive[l.node1] = 1-(1-pn)*(1-p_t)
-                end
+                end                              
             elseif infected[l.node1] > 0 && infected[l.node2] == 0
                 if rand() < p_t
                     infected[l.node2] = -2-exposed_init
                 end
-                if update_this
+                if test_threshold == 1.0 && update_this # naive oracle
                     pn = probabilities_naive[l.node2]
                     probabilities_naive[l.node2] = 1-(1-pn)*(1-p_t)
+                end                              
+            end
+            if test_threshold < 1.0 && update_this # naive non-oracle, knows only tested cases
+                if infected[l.node1] == 2
+                    pn = probabilities_naive[l.node2]
+                    probabilities_naive[l.node2] = 1-(1-pn)*(1-p_t)
+                end            
+                if infected[l.node2] == 2
+                    pn = probabilities_naive[l.node1]
+                    probabilities_naive[l.node1] = 1-(1-pn)*(1-p_t)
                 end
             end
             
@@ -522,10 +520,10 @@ function sweep(links::Array{Link,1},contactlist::Array{Array{Contact,1},1},
     if cure_rate > 0
         cure_infected!(contactlist,probabilities,probabilities_naive,infected,epoch,cure_rate,tolerance)
     end
-    if test_threshold < 1.0
+    if test_threshold < 1.0 && length([x for x in infected if x==1]) > 20 # otherwise test kills all infections; make this a parameter
         test_infected!(links,contactlist,probabilities,probabilities_naive, 
             infected, tolerance, test_threshold, test_fraction, 
-            isolate_factor, epoch)
+            isolate_factor, epoch,p_t)
     end
     convert_exposed!(infected, expose_rate, epoch)
     return epoch+1  # this is the time counter
